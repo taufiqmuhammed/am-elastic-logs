@@ -1,0 +1,6 @@
+flask
+langchain
+faiss-cpu
+sentence-transformers
+pypdf
+requests

@@ -1,0 +1,50 @@
+#  vector.toml  -  CORRECTED  FOR  YOUR  FILE  STRUCTURE
+
+#  1)  Source:  Ingest  all  relevant  log  files  using  specific  patterns
+[sources.am_logs]
+type  =  "file"
+#  Use  wildcards  to  match  the  rotated  log  files  you  provided
+include  =  [
+        "/data/logs/am.log*",
+        "/data/logs/gc.log*",
+        "/data/logs/SoftTokenExt.log*",
+        "/data/logs/SoftTokenWs.log*",
+        "/data/logs/YESsafeToken.log*"
+]
+#  Exclude  non-log  files  that  might  be  in  the  directory
+exclude  =  ["/data/logs/desktop"]
+read_from  =  "beginning"
+
+#  2)  Parse  your  AM  format  into  structured  fields  using  VRL
+[transforms.parse_am]
+type      =  "remap"
+inputs  =  ["am_logs"]
+source  =  '''
+    #  Main  parsing  logic
+    ._m  =  parse_regex(.message,  r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+\[(?P<thr>[^\]]+)\]\s+(?P<lvl>[A-Z]+)\s+-\s+\((?P<cls>[^:]+):(?P<line>\d+)\)\s+(?P<msg>.*)$')
+
+    #  If  parsing  fails,  create  a  fallback  structure  to  avoid  losing  the  log  line
+    if  ._m  ==  null  {
+        .level  =  "unknown"
+        #  The  original  message  is  kept  by  default
+    }  else  {
+        #  Assign  fields  from  the  successful  parse
+        .timestamp  =  ._m.ts
+        .thread  =  ._m.thr
+        .level  =  ._m.lvl
+        .class  =  ._m.cls
+        .line  =  to_int!(._m.line)
+        .message  =  ._m.msg
+        del(._m)  #  Clean  up  temp  field
+    }
+
+    #  Add  the  source  file  path  for  context
+    .file_path  =  .file
+'''
+
+#  3)  Sink:  write  structured  JSONL  for  downstream  embedding
+[sinks.jsonl]
+type                          =  "file"
+inputs                      =  ["parse_am"]
+path                          =  "/data/clean/parsed.jsonl"
+encoding.codec      =  "json"

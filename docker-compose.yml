@@ -1,0 +1,69 @@
+services:
+  vector:
+    image: timberio/vector:latest-alpine
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - ./logs:/data/logs:ro
+      - ./clean:/data/clean
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/clean/parsed.jsonl"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 300s
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build: ./api
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - MODEL=phi-3
+      - INDEX_DIR=/app/index
+      - LOG_JSONL=/app/clean/parsed.jsonl
+      - DOC_DIR=/app/docs
+      - EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+    volumes:
+      - ./clean:/app/clean:ro
+      - ./docs:/app/docs:ro
+      - ./index:/app/index
+    ports:
+      - "8000:8000"
+    depends_on:
+      vector:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  indexer:
+    build: ./api
+    command: ["python", "build_index.py"]
+    environment:
+      - INDEX_DIR=/app/index
+      - LOG_JSONL=/app/clean/parsed.jsonl
+      - DOC_DIR=/app/docs
+      - EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+    volumes:
+      - ./clean:/app/clean:ro
+      - ./docs:/app/docs:ro
+      - ./index:/app/index
+    depends_on:
+      vector:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  ollama_models:

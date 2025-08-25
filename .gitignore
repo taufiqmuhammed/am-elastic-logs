@@ -1,0 +1,16 @@
+# Ignore generated data and logs
+/clean/
+/index/
+/logs/
+/docs/
+
+# Ignore Docker volumes
+/ollama_models/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore system files
+.DS_Store
+
