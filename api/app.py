@@ -56,11 +56,13 @@ Return JSON only:
 
 def ollama_generate(prompt):
     try:
-        r = requests.post(f"{OLLAMA_URL}/api/generate",
-                          json={"model": MODEL, "prompt": prompt, "stream": False},
+        r = requests.post(f"{OLLAMA_URL}/api/chat",
+                          json={"model": MODEL, "messages":[{"role": "user", "content": prompt}], "stream": False},
                           timeout=120)
         r.raise_for_status()
-        return r.json().get("response", "{}")
+        response_data = r.json()
+#        return r.json().get("response", "{}")
+        return response_data.get("message", {}).get("content", "{}")
     except requests.exceptions.RequestException as e:
         raise Exception(f"Ollama API error: {e}")
 
@@ -85,8 +87,11 @@ def anomalies():
         prompt = SYSTEM + "\n\n" + USER_TMPL.format(lines=json.dumps(lines, ensure_ascii=False))
         data = ollama_generate(prompt)
         
+        # Clean the response to remove markdown backticks and "json" label
+        cleaned_data = data.strip().replace("```json", "").replace("```", "")
+
         try:
-            result = json.loads(data)
+            result = json.loads(cleaned_data)
             return jsonify(result)
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid JSON response from LLM", "raw_response": data}), 500

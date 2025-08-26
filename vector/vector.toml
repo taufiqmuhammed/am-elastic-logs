@@ -1,0 +1,80 @@
+#  vector.toml  -  CORRECTED  FOR  YOUR  FILE  STRUCTURE
+
+#  1)  Source:  Ingest  all  relevant  log  files  using  specific  patterns
+[sources.am_logs]
+type  =  "file"
+#  Use  wildcards  to  match  the  rotated  log  files  you  provided
+include  =  [
+        "/data/logs/am.log*",
+        "/data/logs/gc.log*",
+        "/data/logs/SoftTokenExt.log*",
+        "/data/logs/SoftTokenWs.log*",
+        "/data/logs/YESsafeToken.log*"
+]
+#  Exclude  non-log  files  that  might  be  in  the  directory
+exclude  =  ["/data/logs/desktop"]
+read_from  =  "beginning"
+
+
+
+# --- Transforms ---
+
+# (NEW) Add a throttle to prevent memory overload
+[transforms.am_logs_throttled]
+type = "throttle"
+inputs = ["am_logs"]
+threshold = 1000 # Allow 1000 events per second
+window_secs = 10
+key_field = "source_type"
+
+# (NEW) Create metrics to see what's being processed
+[transforms.log_metrics]
+type = "log_to_metric"
+inputs = ["am_logs_throttled"]
+[[transforms.log_metrics.metrics]]
+  type = "counter"
+  field = "file"
+  name = "files_processed"
+  namespace = "vector"
+
+# (IMPROVED) More resilient parsing logic
+[transforms.parse_am]
+type   = "remap"
+inputs = ["log_metrics"] # Chain from the metrics transform
+source = '''
+  # Add the source file path for context first
+  .file_path = .file
+
+  # Attempt to parse the main log format in a safer way
+  parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+\[(?P<thr>[^\]]+)\]\s+(?P<lvl>[A-Z]+)\s+-\s+\((?P<cls>[^:]+):(?P<line>\d+)\)\s+(?P<msg>.*)$')
+
+  if err != null {
+    # If parsing fails, log the error and keep the original message
+    log("Failed to parse log line: " + err, level: "warn")
+    .level = "unparsed"
+  } else {
+    # If successful, assign all the fields
+    .timestamp = parsed.ts
+    .thread = parsed.thr
+    .level = parsed.lvl
+    .class = parsed.cls
+    .line = to_int!(parsed.line)
+    .message = parsed.msg
+  }
+'''
+
+# --- Sinks ---
+[sinks.jsonl]
+type             = "file"
+inputs           = ["parse_am"]
+path             = "/data/clean/parsed.jsonl"
+encoding.codec   = "json"
+
+# (NEW) A sink to see the metrics in the console
+[sinks.metrics_console]
+type   = "console"
+inputs = ["log_metrics"]
+encoding.codec = "json"
+
+
+
