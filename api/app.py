@@ -8,10 +8,48 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 
 # Environment & constants
-OLLAMA_URL    = os.getenv("OLLAMA_URL", "http://ollama:11434")
-MODEL         = os.getenv("MODEL", "phi3")
-INDEX_DIR     = os.getenv("INDEX_DIR", "/app/index")
-EMBED_MODEL   = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+OLLAMA_URL  = os.getenv("OLLAMA_URL", "http://ollama:11434")
+MODEL       = os.getenv("MODEL", "phi3")
+INDEX_DIR   = os.getenv("INDEX_DIR", "/app/index")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+# Chunking & summarization settings
+CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", "8"))
+SYSTEM        = (
+    "You are a precise log analysis expert. "
+    "Use only the provided lines. Return valid JSON."
+)
+USER_TMPL     = """
+Given these log lines (array of objects with text+meta):
+
+{lines}
+
+Tasks:
+1) Brief summary of notable events/bursts.
+2) anomalies: list items with fields: index (i), reason, severity (low|medium|high).
+3) next_actions: concrete follow-ups.
+
+Return JSON only:
+{{"summary":"...", "anomalies":[{{"i":0,"reason":"...","severity":"medium"}}], "next_actions":["...","..."]}}
+"""
+FINAL_SYSTEM  = (
+    "You are a precise log analysis expert. "
+    "Combine the chunk summaries and anomalies into a cohesive global report. "
+    "Return valid JSON."
+)
+FINAL_USER_TPL = """
+Given these chunk summaries:
+{summaries}
+
+And these anomalies:
+{anomalies}
+
+And these next_actions:
+{next_actions}
+
+Return JSON only:
+{{"summary":"...", "anomalies":[...], "next_actions":[...]}}
+"""
 
 app = Flask(__name__)
 
@@ -49,37 +87,18 @@ def query():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-SYSTEM = (
-    "You are a precise log analysis expert. "
-    "Use only the provided lines. Return valid JSON."
-)
-
-USER_TMPL = """
-Given these log lines (array of objects with text+meta):
-
-{lines}
-
-Tasks:
-1) Brief summary of notable events/bursts.
-2) anomalies: list items with fields: index (i), reason, severity (low|medium|high).
-3) next_actions: concrete follow-ups.
-
-Return JSON only:
-{{"summary":"...", "anomalies":[{{"i":0,"reason":"...","severity":"medium"}}], "next_actions":["...","..."]}}
-"""
-
 def ollama_generate(prompt: str) -> str:
-    url = f"{OLLAMA_URL}/api/generate"
+    """
+    Call Ollama’s HTTP /api/generate endpoint.
+    """
+    url     = f"{OLLAMA_URL}/api/generate"
     payload = {"model": MODEL, "prompt": prompt, "stream": False}
 
-    try:
-        r = requests.post(url, json=payload, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        # Ollama v0.11.7 /api/generate returns {"choices":[{"text":...}], ...}
-        return data["choices"][0]["text"].strip()
-    except Exception as e:
-        raise Exception(f"Ollama API error: {e}")
+    r = requests.post(url, json=payload, timeout=120)
+    r.raise_for_status()
+    data = r.json()
+    # Ollama v0.11.7 /api/generate → {"choices":[{"text":...}], ...}
+    return data["choices"][0]["text"].strip()
 
 @app.route("/anomalies", methods=["POST"])
 def anomalies():
@@ -91,29 +110,64 @@ def anomalies():
     k    = int(body.get("k", 60))
 
     try:
+        # 1) Retrieve top-k hits
         hits = vs.similarity_search(q, k=k)
 
-        # Prepare up to 100 entries for the LLM
+        # 2) Build up to 100 lines
         lines = [
             {"i": i, "text": h.page_content, "meta": h.metadata}
             for i, h in enumerate(hits)
         ][:100]
 
-        prompt       = SYSTEM + "\n\n" + USER_TMPL.format(
-            lines=json.dumps(lines, ensure_ascii=False)
-        )
-        raw_response = ollama_generate(prompt).strip()
+        # 3) Split into chunks of CHUNK_SIZE
+        chunks = [
+            lines[i : i + CHUNK_SIZE]
+            for i in range(0, len(lines), CHUNK_SIZE)
+        ]
 
-        # Strip any markdown fencing
-        cleaned = raw_response.replace("```json", "").replace("```", "")
-        result  = json.loads(cleaned)
+        chunk_summaries   = []
+        anomalies_all     = []
+        next_actions_all  = []
+
+        # 4) Map: process each chunk
+        for idx, chunk in enumerate(chunks):
+            prompt = SYSTEM + "\n\n" + USER_TMPL.format(
+                lines=json.dumps(chunk, ensure_ascii=False)
+            )
+            raw     = ollama_generate(prompt)
+            cleaned = raw.replace("```json", "").replace("```", "").strip()
+            data    = json.loads(cleaned)
+
+            # collect summary
+            chunk_summaries.append(data["summary"])
+
+            # adjust anomaly indices & collect
+            for a in data["anomalies"]:
+                a["i"] += idx * CHUNK_SIZE
+                anomalies_all.append(a)
+
+            # collect next_actions
+            next_actions_all.extend(data["next_actions"])
+
+        # 5) Reduce: stitch into one final JSON
+        final_prompt = FINAL_SYSTEM + "\n\n" + FINAL_USER_TPL.format(
+            summaries=json.dumps(chunk_summaries, ensure_ascii=False),
+            anomalies=json.dumps(anomalies_all, ensure_ascii=False),
+            next_actions=json.dumps(next_actions_all, ensure_ascii=False),
+        )
+        final_raw   = ollama_generate(final_prompt)
+        final_clean = final_raw.replace("```json", "").replace("```", "").strip()
+        result      = json.loads(final_clean)
 
         return jsonify(result)
+
     except json.JSONDecodeError:
+        # If final or chunk call failed to produce valid JSON
         return jsonify({
-            "error": "Invalid JSON from LLM",
-            "raw_response": raw_response
+            "error":        "Invalid JSON from LLM",
+            "raw_response": final_raw if 'final_raw' in locals() else raw
         }), 500
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -125,13 +179,11 @@ def health():
         and len(os.listdir(INDEX_DIR)) > 0
     )
 
-    # Test Ollama connectivity via /api/tags
-    ollama_ready = False
     try:
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         ollama_ready = (r.status_code == 200)
     except:
-        pass
+        ollama_ready = False
 
     status = "healthy" if (idx_ready and ollama_ready) else "degraded"
     return jsonify({
