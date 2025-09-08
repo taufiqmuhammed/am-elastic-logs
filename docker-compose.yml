@@ -1,11 +1,12 @@
 services:
+
   vector:
     build: ./vector
     mem_limit: 4g
     environment:
-      - VECTOR_CONFIG=/etc/vector/vector.toml
+      VECTOR_CONFIG: /etc/vector/vector.toml
     volumes:
-      - ./temp_logs:/data/logs:ro
+      - ./logs:/data/logs:ro        # switch temp_logs → logs when ready
       - ./clean:/data/clean
     restart: on-failure
     healthcheck:
@@ -17,28 +18,47 @@ services:
 
   ollama:
     image: ollama/ollama@sha256:c76340da9ed9906b01ed5462ca966b608de93a76c1fbc01123d07034a99f699b
+
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+          echo "🟢 Starting Ollama server…" &&
+          ollama serve & pid=$$! &&
+          echo "⏳ Waiting 5s for server to bind…" &&
+          sleep 5 &&
+          echo "📥 Pulling phi3 (idempotent)…" &&
+          ollama pull phi3 &&
+          echo "🚀 phi3 ready — foregrounding PID $$pid" &&
+          wait $$pid
+
     ports:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
     restart: unless-stopped
+
     healthcheck:
-      test: ["CMD","curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 60s
-      timeout: 60s
-      retries: 10
-      start_period: 120s #wait 2 minutes before first check
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+
 
   api:
     build: ./api
     environment:
-      - OLLAMA_URL=http://ollama:11434
-      - MODEL=phi3
-      - INDEX_DIR=/app/index
-      - LOG_JSONL=/app/clean/parsed.jsonl
-      - DOC_DIR=/app/docs
-      - EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      MODEL:       phi3
+      OLLAMA_URL:  http://ollama:11434
+      OLLAMA_HOST: http://ollama:11434
+      INDEX_DIR:   /app/index
+      LOG_JSONL:   /app/clean/parsed.jsonl
+      DOC_DIR:     /app/docs
+      EMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
     volumes:
+      - ./api:/app            # mount local code over /app in container
       - ./clean:/app/clean:ro
       - ./docs:/app/docs:ro
       - ./index:/app/index
@@ -47,18 +67,24 @@ services:
     depends_on:
       vector:
         condition: service_healthy
-#      ollama:
-#        condition: service_healthy
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   indexer:
     build: ./api
     command: ["python", "build_index.py"]
     environment:
-      - INDEX_DIR=/app/index
-      - LOG_JSONL=/app/clean/parsed.jsonl
-      - DOC_DIR=/app/docs
-      - EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      INDEX_DIR:   /app/index
+      LOG_JSONL:   /app/clean/parsed.jsonl
+      DOC_DIR:     /app/docs
+      EMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
     volumes:
       - ./clean:/app/clean:ro
       - ./docs:/app/docs:ro

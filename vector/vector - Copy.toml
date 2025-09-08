@@ -24,27 +24,31 @@ key_field = "file"
 type   = "remap"
 inputs = ["logs_throttled"]
 source = '''
-  .file_path = .file
-  .raw       = to_string(.message) ?? ""
-  .raw       = replace(.raw, "\r", "")    # drop trailing CR
+.file_path = .file
+.raw = to_string(.message) ?? to_string(.) ?? ""
 
-  am, err = parse_regex(.raw,
-    r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+\[(?P<thr>[^\]]+)\]\s+(?P<lvl>[A-Z]+)\s+-\s+\((?P<cls>[^:]+)(?::(?P<line>\d+))?\)\s+(?P<msg>.*)$'
-  )
+if match!(.file, r'.*am\.log.*|SoftToken.*|YESsafe.*') {
+  am, am_err = parse_regex(.raw, r'^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+
 
-  if err == null {
+\[(?P<thr>[^\]
+
+]+)\]
+
+\s+(?P<lvl>[A-Z]+)\s+-+\s+\((?P<cls>[^:]+)(?::(?P<line>\d+))?\)\s+(?P<msg>.*)$')
+  if am_err == null {
     .timestamp = am.ts
     .thread    = am.thr
     .level     = am.lvl
     .class     = am.cls
     if exists(am.line) { .line = to_int!(am.line) }
     .message   = am.msg
-    .text      = am.msg
+    .text      = .message
   } else {
     .level   = "unparsed"
     .message = .raw
     .text    = .raw
   }
+}
 '''
 
 
