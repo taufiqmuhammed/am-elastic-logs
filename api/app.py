@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 import requests
 from flask import Flask, request, jsonify
 from langchain.embeddings import HuggingFaceEmbeddings
@@ -31,24 +32,6 @@ Tasks:
 
 Return JSON only:
 {{"summary":"...", "anomalies":[{{"i":0,"reason":"...","severity":"medium"}}], "next_actions":["...","..."]}}
-"""
-FINAL_SYSTEM  = (
-    "You are a precise log analysis expert. "
-    "Combine the chunk summaries and anomalies into a cohesive global report. "
-    "Return valid JSON."
-)
-FINAL_USER_TPL = """
-Given these chunk summaries:
-{summaries}
-
-And these anomalies:
-{anomalies}
-
-And these next_actions:
-{next_actions}
-
-Return JSON only:
-{{"summary":"...", "anomalies":[...], "next_actions":[...]}}
 """
 
 app = Flask(__name__)
@@ -89,7 +72,8 @@ def query():
 
 def ollama_generate(prompt: str) -> str:
     """
-    Call Ollama’s HTTP /api/generate endpoint.
+    Call Ollama’s HTTP /api/generate endpoint and
+    extract the generated text from whatever shape it returns.
     """
     url     = f"{OLLAMA_URL}/api/generate"
     payload = {"model": MODEL, "prompt": prompt, "stream": False}
@@ -97,8 +81,32 @@ def ollama_generate(prompt: str) -> str:
     r = requests.post(url, json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
-    # Ollama v0.11.7 /api/generate → {"choices":[{"text":...}], ...}
-    return data["choices"][0]["text"].strip()
+
+    # 1) Standard OpenAI-like: choices → text
+    if "choices" in data and isinstance(data["choices"], list):
+        text = data["choices"][0].get("text")
+        if text is not None:
+            return text.strip()
+
+    # 2) Ollama v0.11+ shape: response
+    if "response" in data and isinstance(data["response"], str):
+        return data["response"].strip()
+
+    # 3) Some versions use results or outputs arrays
+    for key in ("results", "outputs"):
+        if key in data and isinstance(data[key], list):
+            item = data[key][0]
+            if isinstance(item, dict) and "text" in item:
+                return item["text"].strip()
+            if isinstance(item, str):
+                return item.strip()
+
+    # 4) Fallback: any top-level string field
+    for v in data.values():
+        if isinstance(v, str):
+            return v.strip()
+
+    raise KeyError("no text field in response JSON")
 
 @app.route("/anomalies", methods=["POST"])
 def anomalies():
@@ -107,65 +115,62 @@ def anomalies():
 
     body = request.get_json(force=True)
     q    = body.get("query", "recent anomalies")
-    k    = int(body.get("k", 60))
+    k    = min(int(body.get("k", 32)), 32)  # cap at 32 hits
 
     try:
-        # 1) Retrieve top-k hits
+        # 1) FAISS search
         hits = vs.similarity_search(q, k=k)
 
-        # 2) Build up to 100 lines
+        # 2) Build up to 32 simplified lines (no meta, just text)
         lines = [
-            {"i": i, "text": h.page_content, "meta": h.metadata}
+            {"i": i, "text": h.page_content}
             for i, h in enumerate(hits)
-        ][:100]
+        ][:32]
 
-        # 3) Split into chunks of CHUNK_SIZE
+        # 3) Chunk into size 4
+        chunk_size = 4
         chunks = [
-            lines[i : i + CHUNK_SIZE]
-            for i in range(0, len(lines), CHUNK_SIZE)
+            lines[i : i + chunk_size]
+            for i in range(0, len(lines), chunk_size)
         ]
 
-        chunk_summaries   = []
-        anomalies_all     = []
-        next_actions_all  = []
+        chunk_summaries  = []
+        anomalies_all    = []
+        next_actions_all = []
 
-        # 4) Map: process each chunk
+        # 4) Map: LLM each chunk
         for idx, chunk in enumerate(chunks):
             prompt = SYSTEM + "\n\n" + USER_TMPL.format(
                 lines=json.dumps(chunk, ensure_ascii=False)
             )
-            raw     = ollama_generate(prompt)
-            cleaned = raw.replace("```json", "").replace("```", "").strip()
-            data    = json.loads(cleaned)
+            raw = ollama_generate(prompt)
 
-            # collect summary
+            # ─── SANITIZE JSON ───────────────────────────────────────────
+            clean = raw.replace("```json", "").replace("```", "").strip()
+            clean = re.sub(r'//.*', '', clean)             # strip // comments
+            clean = re.sub(r',\s*(\]|\})', r'\1', clean)   # remove trailing commas
+            data  = json.loads(clean)
+            # ─────────────────────────────────────────────────────────────
+
             chunk_summaries.append(data["summary"])
-
-            # adjust anomaly indices & collect
             for a in data["anomalies"]:
-                a["i"] += idx * CHUNK_SIZE
+                a["i"] += idx * chunk_size
                 anomalies_all.append(a)
-
-            # collect next_actions
             next_actions_all.extend(data["next_actions"])
 
-        # 5) Reduce: stitch into one final JSON
-        final_prompt = FINAL_SYSTEM + "\n\n" + FINAL_USER_TPL.format(
-            summaries=json.dumps(chunk_summaries, ensure_ascii=False),
-            anomalies=json.dumps(anomalies_all, ensure_ascii=False),
-            next_actions=json.dumps(next_actions_all, ensure_ascii=False),
-        )
-        final_raw   = ollama_generate(final_prompt)
-        final_clean = final_raw.replace("```json", "").replace("```", "").strip()
-        result      = json.loads(final_clean)
+        # 5) Local reduce: concatenate summaries
+        final_summary = " ".join(chunk_summaries)
 
-        return jsonify(result)
+        return jsonify({
+            "summary":      final_summary,
+            "anomalies":    anomalies_all,
+            "next_actions": next_actions_all
+        })
 
     except json.JSONDecodeError:
-        # If final or chunk call failed to produce valid JSON
         return jsonify({
             "error":        "Invalid JSON from LLM",
-            "raw_response": final_raw if 'final_raw' in locals() else raw
+            "raw_response": raw
         }), 500
 
     except Exception as e:
