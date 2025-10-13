@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Log Analyzer</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+  <h1>Log Analyzer</h1>
+
+  <div id="controls">
+    <textarea id="question"
+      placeholder="Type your question here (e.g. Why did payments fail?)"></textarea>
+    <input type="number" id="k" value="32" min="1" max="100"
+      title="How many log lines to fetch"/>
+    <button id="analyzeBtn">Analyze</button>
+  </div>
+
+  <div id="results">
+    <h2>Summary</h2>
+    <pre id="summary"></pre>
+
+    <h2>Confirmed Anomalies</h2>
+    <ul id="anomalies"></ul>
+
+    <h2>Layman Explanation</h2>
+    <pre id="layman"></pre>
+  </div>
+
+  <script src="/static/js/analyze.js"></script>
+</body>
+</html>

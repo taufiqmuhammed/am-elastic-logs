@@ -1,92 +1,105 @@
-# api/build_index.py
-import json, glob, os, sys
-from langchain.schema import Document
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
+#!/usr/bin/env python3
+import os
+import json
+import glob
+import requests
+from sentence_transformers import SentenceTransformer
 from pdf_chunker import iter_pdf_chunks
 
-EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-LOG_JSONL = os.getenv("LOG_JSONL", "/app/clean/parsed.jsonl")
-DOC_DIR = os.getenv("DOC_DIR", "/app/docs")
-INDEX_DIR = os.getenv("INDEX_DIR", "/app/index")
+# Configuration
+ES_HOST       = os.getenv("ES_HOST",      "http://elasticsearch:9200")
+ES_INDEX_LOGS = os.getenv("ES_INDEX_LOGS","logs_vector")
+ES_INDEX_DOCS = os.getenv("ES_INDEX_DOCS","docs_vector")
+EMBED_MODEL   = os.getenv("EMBED_MODEL",  "sentence-transformers/all-MiniLM-L6-v2")
+LOG_JSONL     = os.getenv("LOG_JSONL",    "/app/clean/parsed.jsonl")
+DOC_DIR       = os.getenv("DOC_DIR",      "/app/docs")
+VECTOR_DIMS   = int(os.getenv("VECTOR_DIMS","384"))
 
-def iter_log_docs(path):
-    """Read parsed log JSONL and create Documents"""
-    if not os.path.exists(path):
-        print(f"Log file not found: {path}")
+headers = {"Content-Type": "application/json"}
+
+def ensure_index(name):
+    """
+    Create an ES index with:
+      • text
+      • dense_vector
+      • timestamp parsed either as ISO or space-separated
+    """
+    mapping = {
+      "mappings": {
+        "properties": {
+          "text": {
+            "type": "text"
+          },
+          "embedding": {
+            "type":       "dense_vector",
+            "dims":       VECTOR_DIMS,
+            "index":      True,
+            "similarity": "cosine"
+          },
+          "timestamp": {
+            "type":   "date",
+            "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS"
+          },
+          "thread": {"type": "keyword"},
+          "level":  {"type": "keyword"}
+        }
+      }
+    }
+
+    resp = requests.put(f"{ES_HOST}/{name}", json=mapping, headers=headers)
+    if resp.status_code not in (200, 201):
+        print(f"[WARN] Could not create index {name}: {resp.text}")
+    else:
+        print(f"[+] Created index '{name}' with extended timestamp parsing")
+
+def index_doc(index, payload):
+    url = f"{ES_HOST}/{index}/_doc"
+    r = requests.post(url, json=payload, headers=headers)
+    if r.status_code not in (200, 201):
+        print(f"[ERROR] Failed to index doc: {r.status_code} {r.text}")
+
+def index_logs():
+    if not os.path.exists(LOG_JSONL):
+        print(f"[WARN] No logs JSONL at {LOG_JSONL}")
         return
-        
-    line_count = 0
-    with open(path, "r", errors="ignore") as f:
+    count = 0
+    with open(LOG_JSONL, "r", errors="ignore") as f:
         for line in f:
             try:
-                rec = json.loads(line.strip())
-                text = f'{rec.get("timestamp","")} [{rec.get("thread","")}] {rec.get("level","")} - {rec.get("message","")}'
-                yield Document(page_content=text, metadata={"kind":"log", **rec})
-                line_count += 1
-            except json.JSONDecodeError as e:
-                print(f"Skipping invalid JSON line: {e}")
+                rec = json.loads(line)
+            except:
                 continue
-    print(f"Processed {line_count} log entries")
+            text = f"{rec.get('timestamp')} [{rec.get('thread')}] {rec.get('level')} - {rec.get('message')}"
+            vector = model.encode(text).tolist()
+            doc = {"text": text, "embedding": vector, **{k: v for k, v in rec.items()}}
+            index_doc(ES_INDEX_LOGS, doc)
+            count += 1
+    print(f"[+] Indexed {count} log lines")
 
-def iter_doc_docs(doc_dir):
-    """Process PDFs in doc directory"""
-    if not os.path.isdir(doc_dir):
-        print(f"Doc directory not found: {doc_dir}")
+def index_pdfs():
+    if not os.path.isdir(DOC_DIR):
+        print(f"[WARN] No docs folder at {DOC_DIR}")
         return
-        
-    pdf_files = glob.glob(os.path.join(doc_dir, "*.pdf"))
-    print(f"Found {len(pdf_files)} PDF files")
-    
-    for pdf in pdf_files:
-        print(f"Processing PDF: {os.path.basename(pdf)}")
-        try:
-            for d in iter_pdf_chunks(pdf):
-                d.metadata["kind"] = "doc"
-                yield d
-        except Exception as e:
-            print(f"Error processing {pdf}: {e}")
-            continue
-
-def main():
-    print("Starting index build...")
-    print(f"Embedding model: {EMBED_MODEL}")
-    print(f"Log JSONL: {LOG_JSONL}")
-    print(f"Doc directory: {DOC_DIR}")
-    print(f"Index directory: {INDEX_DIR}")
-    
-    try:
-        embed = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-        print("Embeddings model loaded")
-    except Exception as e:
-        print(f"Error loading embeddings: {e}")
-        sys.exit(1)
-    
-    docs = []
-    
-    # Process logs
-    print("Processing log files...")
-    docs.extend(list(iter_log_docs(LOG_JSONL)))
-    
-    # Process docs  
-    print("Processing PDF files...")
-    docs.extend(list(iter_doc_docs(DOC_DIR)))
-    
-    if not docs:
-        print("No documents found to index!")
-        sys.exit(1)
-        
-    print(f"Creating index with {len(docs)} documents...")
-    
-    try:
-        vs = FAISS.from_documents(docs, embed)
-        os.makedirs(INDEX_DIR, exist_ok=True)
-        vs.save_local(INDEX_DIR)
-        print(f"Index saved to {INDEX_DIR}")
-        print("Index build completed successfully!")
-    except Exception as e:
-        print(f"Error building index: {e}")
-        sys.exit(1)
+    files = glob.glob(os.path.join(DOC_DIR, "*.pdf"))
+    print(f"[+] Found {len(files)} PDFs")
+    count = 0
+    for pdf in files:
+        for chunk in iter_pdf_chunks(pdf):
+            text = chunk.page_content
+            vector = model.encode(text).tolist()
+            doc = {"text": text, "embedding": vector, **chunk.metadata}
+            index_doc(ES_INDEX_DOCS, doc)
+            count += 1
+    print(f"[+] Indexed {count} PDF chunks")
 
 if __name__ == "__main__":
-    main()
+    print("▶️  Starting ES indexer…")
+    model = SentenceTransformer(EMBED_MODEL)
+
+    ensure_index(ES_INDEX_LOGS)
+    ensure_index(ES_INDEX_DOCS)
+
+    index_logs()
+    index_pdfs()
+
+    print("✅  Indexing complete!")

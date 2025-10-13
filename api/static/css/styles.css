@@ -1,0 +1,24 @@
+body {
+  font-family: sans-serif;
+  margin: 2em;
+}
+#controls {
+  margin-bottom: 1em;
+}
+#question {
+  width: 100%;
+  height: 4em;
+}
+#k {
+  width: 4em;
+}
+button {
+  margin-left: 1em;
+}
+#results h2 {
+  margin-top: 1.5em;
+}
+pre {
+  background: #f7f7f7;
+  padding: .5em;
+}

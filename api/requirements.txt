@@ -5,3 +5,4 @@ faiss-cpu
 sentence-transformers
 pypdf
 requests
+elasticsearch>=8.12.0

@@ -1,0 +1,104 @@
+# api/build_index.py
+import json, glob, os, sys
+from langchain.schema import Document
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from pdf_chunker import iter_pdf_chunks
+
+EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+LOG_JSONL = os.getenv("LOG_JSONL", "/app/clean/parsed.jsonl")
+DOC_DIR = os.getenv("DOC_DIR", "/app/docs")
+INDEX_DIR = os.getenv("INDEX_DIR", "/app/index")
+
+def iter_log_docs(path):
+    """Read parsed log JSONL and create Documents"""
+    if not os.path.exists(path):
+        print(f"Log file not found: {path}")
+        return
+        
+    line_count = 0
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            try:
+                rec = json.loads(line.strip())
+                text = f'{rec.get("timestamp","")} [{rec.get("thread","")}] {rec.get("level","")} - {rec.get("message","")}'
+                yield Document(page_content=text, metadata={"kind":"log", **rec})
+                line_count += 1
+            except json.JSONDecodeError as e:
+                print(f"Skipping invalid JSON line: {e}")
+                continue
+    print(f"Processed {line_count} log entries")
+
+def iter_doc_docs(doc_dir):
+    """Process PDFs in doc directory"""
+    if not os.path.isdir(doc_dir):
+        print(f"Doc directory not found: {doc_dir}")
+        return
+        
+    pdf_files = glob.glob(os.path.join(doc_dir, "*.pdf"))
+    print(f"Found {len(pdf_files)} PDF files")
+    
+    for pdf in pdf_files:
+        print(f"Processing PDF: {os.path.basename(pdf)}")
+        try:
+            for d in iter_pdf_chunks(pdf):
+                d.metadata["kind"] = "doc"
+                yield d
+        except Exception as e:
+            print(f"Error processing {pdf}: {e}")
+            continue
+
+def main():
+    print("Starting index build...")
+    print(f"Embedding model: {EMBED_MODEL}")
+    print(f"Log JSONL: {LOG_JSONL}")
+    print(f"Doc directory: {DOC_DIR}")
+    print(f"Index directory: {INDEX_DIR}")
+    
+    try:
+        embed = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+        print("Embeddings model loaded")
+    except Exception as e:
+        print(f"Error loading embeddings: {e}")
+        sys.exit(1)
+    
+    docs = []
+    
+    # Process logs
+    print("Processing log files...")
+    docs.extend(list(iter_log_docs(LOG_JSONL)))
+    
+    # Process docs  
+    print("Processing PDF files...")
+    docs.extend(list(iter_doc_docs(DOC_DIR)))
+    
+    if not docs:
+        print("No documents found to index!")
+        sys.exit(1)
+        
+    print(f"Creating index with {len(docs)} documents...")
+    
+    try:
+        vs = FAISS.from_documents(docs, embed)
+        os.makedirs(INDEX_DIR, exist_ok=True)
+        vs.save_local(INDEX_DIR)
+        print(f"Index saved to {INDEX_DIR}")
+        print("Index build completed successfully!")
+    except Exception as e:
+        print(f"Error building index: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+
+#exactly what the above does, step by step:
+#1. 	Reads your parsed JSONL log file and turns each line into a LangChain Document, capturing the timestamp, thread, level and message.
+#2. 	Looks in your docs folder for any PDFs, chunks each into smaller text pieces (via ), and wraps each chunk in a Document too.
+#3. 	Loads a sentence-transformer model (by default the all-MiniLM-L6-v2 embedder).
+#4. 	Feeds every Document into FAISS, which builds an in-memory similarity index.
+#5. 	Saves that FAISS index out to disk under  so your API container can load it later.
+
+
+    

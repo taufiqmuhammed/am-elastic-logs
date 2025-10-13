@@ -1,5 +1,16 @@
 services:
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
   vector:
     build: ./vector
     mem_limit: 4g
@@ -96,3 +107,5 @@ services:
 
 volumes:
   ollama_models:
+  esdata:
+  
