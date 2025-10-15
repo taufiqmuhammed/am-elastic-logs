@@ -94,7 +94,38 @@ The system is ready when you see:
 - ✅ Vector processing completed
 - ✅ Flask API health check passing
 
-### 6. Access the Web Interface
+### 6. Build and Run the Indexer
+After services are initialized, build and run the indexer to create the search index:
+
+```bash
+# Build the indexer service
+docker compose build indexer
+
+# Run the indexer to build the search index
+docker compose run --rm indexer
+```
+
+This executes `python build_index.py` inside the container with all dependencies installed.
+
+### 7. Verify the Index
+Check that Elasticsearch has indexed your logs:
+
+```bash
+curl -X GET http://localhost:9200/_cat/indices?v
+```
+
+You should see `logs_vector` with a nonzero doc count.
+
+### 8. Test the API
+Verify the system is working by testing anomaly detection:
+
+```bash
+curl -X POST http://localhost:8000/anomalies \
+  -H "Content-Type: application/json" \
+  -d '{"query":"recent errors","k":20}'
+```
+
+### 9. Access the Web Interface
 Open your browser to: http://localhost:8000
 
 ## 📖 Usage Guide
@@ -263,6 +294,23 @@ docker-compose restart
 - Check log file format compatibility
 - Verify logs are in the `logs/` directory
 - Monitor Vector processing: `docker-compose logs vector`
+
+#### Indexer Issues / "No such file or directory" Errors
+If you encounter errors when running the indexer or missing dependencies:
+
+**Problem**: Running `python3 build_index.py` directly on the host fails
+**Solution**: Always run the indexer inside Docker where dependencies are installed:
+
+```bash
+# ❌ Don't run directly on host
+python3 build_index.py
+
+# ✅ Run inside Docker container
+docker compose build indexer
+docker compose run --rm indexer
+```
+
+**Why**: The host system doesn't have the Python packages installed. The indexer is designed to run inside Docker where `requirements.txt` is installed during the image build.
 
 #### Elasticsearch Connection Issues
 - Verify Elasticsearch health: `curl http://localhost:9200/_cluster/health`
