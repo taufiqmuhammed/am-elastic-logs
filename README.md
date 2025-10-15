@@ -96,7 +96,7 @@ sequenceDiagram
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/am-elastic-logs.git
+git clone https://github.com/taufiqmuhammed/am-elastic-logs
 cd am-elastic-logs
 ```
 
