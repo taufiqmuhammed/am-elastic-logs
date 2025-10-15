@@ -97,9 +97,11 @@ services:
       DOC_DIR:     /app/docs
       EMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
     volumes:
+      - ./api:/app
       - ./clean:/app/clean:ro
       - ./docs:/app/docs:ro
       - ./index:/app/index
+      - ./logs:/app/logs:ro
     depends_on:
       vector:
         condition: service_healthy
