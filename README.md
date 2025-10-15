@@ -38,6 +38,45 @@ graph TB
     end
 ```
 
+## 🔄 System Workflow
+
+This sequence diagram shows how the system processes logs and handles queries:
+
+```mermaid
+sequenceDiagram
+    participant User as User (Browser/CLI)
+    participant Logs as logs/ (raw files)
+    participant Indexer as Indexer container (build_index.py)
+    participant Clean as clean/ (parsed.jsonl)
+    participant ES as Elasticsearch (logs_vector)
+    participant API as API container (Flask :8000)
+    participant Ollama as Ollama (LLM :11434)
+
+    %% Startup
+    User->>API: docker compose up -d<br/>Check /health
+    API->>ES: Health check
+    API->>Ollama: Health check
+
+    %% Ingest
+    User->>Logs: Drop new .log files
+    User->>Indexer: docker compose run --rm indexer
+    Indexer->>Logs: Read raw logs
+    Indexer->>Clean: Write parsed.jsonl
+    Indexer->>ES: Create/Update logs_vector index<br/>Push embedded docs
+
+    %% Query
+    User->>API: POST /anomalies {query,k}
+    API->>ES: k-NN search on logs_vector
+    ES-->>API: Return top-k docs
+    API->>Ollama: Send chunked prompts
+    Ollama-->>API: Return analysis JSON
+    API-->>User: Response {summary, anomalies, layman_explanation}
+
+    %% Reset/Reindex
+    User->>ES: DELETE /logs_vector (if needed)
+    User->>Indexer: Re-run build_index.py
+```
+
 ### Components
 
 - **Vector**: Log parsing and processing pipeline
